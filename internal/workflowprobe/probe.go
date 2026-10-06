@@ -18,6 +18,8 @@ func Run(args []string, output io.Writer) error {
 		run = runNodeLeaseAllocation
 	case "probe-ingestion":
 		run = runProbeIngestion
+	case "probe-batch-job":
+		run = runProbeBatchJob
 	case "consistency-assessment":
 		run = runConsistencyAssessment
 	default:

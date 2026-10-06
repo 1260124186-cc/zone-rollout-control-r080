@@ -34,6 +34,11 @@
       "responsibility": "probe validation, idempotent persistence, and lease completion"
     },
     {
+      "id": "probebatch",
+      "path": "internal/probebatch",
+      "responsibility": "idempotent batch probe intake, per-item transactions, checkpointed resume, and per-item outcomes"
+    },
+    {
       "id": "assessment",
       "path": "internal/assessment",
       "responsibility": "probe aggregation, deterministic verdicts, and latest result reads"
@@ -128,6 +133,29 @@
       "verification": "workflowprobe probe-ingestion submits and replays a probe, then confirms conflicting content and release are rejected",
       "module_ids": [
         "httpapi",
+        "probe",
+        "allocation",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "probe-batch-job",
+      "name": "Checkpointed batch probe jobs",
+      "entry": "PUT /v1/plans/{id}/probe-batches -> confirm/resume -> GET /v1/probe-batches/{id}",
+      "steps": [
+        "validate each lease, payload, and intra-batch duplicate during intake",
+        "order items by lease id and record an idempotent accepted job without writing probes",
+        "submit one item per transaction, recording probe, item result, and checkpoint atomically",
+        "classify each item success, replay, conflict, expired, or not_executed",
+        "resume interrupted jobs from the explicit checkpoint without double-writing"
+      ],
+      "success": "every item reaches a terminal outcome, replays return original probes, and batch, item, and original lease identities stay closed",
+      "failure": "invalid intake leaves no state; cancellation or partial failure resumes at the checkpoint; the single-probe entry keeps its behavior",
+      "verification": "workflowprobe probe-batch-job accepts, confirms, cancels, resumes, replays, and classifies a batch over real HTTP routes",
+      "module_ids": [
+        "httpapi",
+        "probebatch",
         "probe",
         "allocation",
         "domain",

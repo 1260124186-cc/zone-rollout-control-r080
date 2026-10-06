@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,6 +37,34 @@ func decode(w http.ResponseWriter, r *http.Request, target any) error {
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return domain.Validation("request body must contain one JSON value", nil)
+	}
+	return nil
+}
+
+// decodeOptionalEmpty accepts an empty body, an empty JSON object, or an empty
+// JSON object value; anything else (including unknown fields) is rejected.
+func decodeOptionalEmpty(w http.ResponseWriter, r *http.Request) error {
+	r.Body = http.MaxBytesReader(w, r.Body, requestLimit)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		return domain.Validation("request body could not be read", map[string]any{
+			"reason": err.Error(),
+		})
+	}
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	var body map[string]json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		return domain.Validation("request body must contain valid JSON", map[string]any{
+			"reason": err.Error(),
+		})
+	}
+	if len(body) != 0 {
+		return domain.Validation("request body must be empty", nil)
 	}
 	return nil
 }

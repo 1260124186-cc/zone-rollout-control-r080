@@ -44,6 +44,7 @@ internal/plan               计划及区域版本服务
 internal/fleet              解析节点档案服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
+internal/probebatch         批量探针作业、单项检查点和结果分类
 internal/assessment         一致性聚合和最新结果查询
 internal/httpapi            HTTP 路由、中间件和响应映射
 internal/workflowprobe      真实 HTTP 路径验证
@@ -127,6 +128,43 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/leases/<lease_id>/probes \
   }'
 ```
 
+接收批量探针作业（逐项校验租约和载荷，按租约标识稳定排序，不写探针）：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/plans/<plan_id>/probe-batches \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_key": "probe-batch-0001",
+    "items": [
+      {
+        "lease_id": "<lease_id_a>",
+        "request_key": "probe-request-1001",
+        "success": true,
+        "observed_serial": 2026092501,
+        "latency_ms": 12,
+        "observed_at": "2026-09-25T12:00:00Z"
+      },
+      {
+        "lease_id": "<lease_id_b>",
+        "request_key": "probe-request-1002",
+        "success": true,
+        "observed_serial": 2026092501,
+        "latency_ms": 18,
+        "observed_at": "2026-09-25T12:00:00Z"
+      }
+    ]
+  }'
+```
+
+确认作业；中断后从明确检查点续跑：
+
+```bash
+curl -sS -X PATCH http://127.0.0.1:8090/v1/probe-batches/<batch_id>/confirm
+curl -sS -X PATCH http://127.0.0.1:8090/v1/probe-batches/<batch_id>/resume
+```
+
+响应中的每个条目带有 `outcome`：`success`、`replay`、`conflict`、`expired` 或 `not_executed`，并通过 `client_index` 对应到接收请求中的原始位置。作业重试只从 `checkpoint` 处继续，已终态条目不会再次写探针。
+
 请求一致性判定：
 
 ```bash
@@ -176,6 +214,10 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
 | `PATCH` | `/v1/leases/{id}/release` | 提前释放租约 |
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
+| `PUT` | `/v1/plans/{id}/probe-batches` | 接收批量探针作业（逐项校验，不写探针） |
+| `PATCH` | `/v1/probe-batches/{id}/confirm` | 从检查点提交作业 |
+| `PATCH` | `/v1/probe-batches/{id}/resume` | 从检查点续跑中断作业 |
+| `GET` | `/v1/probe-batches/{id}` | 查询作业与逐项结果 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
 
@@ -187,6 +229,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
+- 批量探针作业在接收阶段逐项校验租约、载荷和批次内重复；确认后按租约标识的稳定顺序逐条提交。
+- 批量条目独立给出 `success`、`replay`、`conflict`、`expired` 或 `not_executed`；每项的探针写入、结果和检查点推进在同一事务内，续跑绝不重复写探针。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
@@ -215,6 +259,7 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
+go run ./cmd/workflowprobe probe-batch-job
 go run ./cmd/workflowprobe consistency-assessment
 ```
 

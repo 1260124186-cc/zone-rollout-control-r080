@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -54,6 +56,18 @@ type ProbeInput struct {
 
 type AssessmentInput struct {
 	RequestKey string `json:"request_key"`
+}
+
+const MaxProbeBatchItems = 250
+
+type ProbeBatchItemInput struct {
+	LeaseID string `json:"lease_id"`
+	ProbeInput
+}
+
+type ProbeBatchInput struct {
+	RequestKey string                `json:"request_key"`
+	Items      []ProbeBatchItemInput `json:"items"`
 }
 
 func NormalizePlanInput(input PlanCreateInput) PlanCreateInput {
@@ -245,6 +259,41 @@ func ValidateAssessmentInput(input AssessmentInput) error {
 		return Validation("assessment input is invalid", map[string]any{
 			"request_key": err.Error(),
 		})
+	}
+	return nil
+}
+
+// ValidateProbeBatchInput checks the envelope and each item payload. Lease
+// existence, plan ownership, and intra-batch duplicate lease IDs are enforced
+// by the batch service against committed state during acceptance.
+func ValidateProbeBatchInput(input ProbeBatchInput, now time.Time) error {
+	input.RequestKey = strings.TrimSpace(input.RequestKey)
+	details := make(map[string]any)
+	if err := validateRequestKey(input.RequestKey); err != nil {
+		details["request_key"] = err.Error()
+	}
+	if len(input.Items) < 1 || len(input.Items) > MaxProbeBatchItems {
+		details["items"] = "must contain between 1 and 250 items"
+	}
+	for index, item := range input.Items {
+		itemDetails := make(map[string]any)
+		if strings.TrimSpace(item.LeaseID) == "" {
+			itemDetails["lease_id"] = "is required"
+		}
+		if err := ValidateProbeInput(item.ProbeInput, now); err != nil {
+			var probeErr *DomainError
+			if errors.As(err, &probeErr) {
+				for field, reason := range probeErr.Details {
+					itemDetails[field] = reason
+				}
+			}
+		}
+		if len(itemDetails) > 0 {
+			details[fmt.Sprintf("items[%d]", index)] = itemDetails
+		}
+	}
+	if len(details) > 0 {
+		return Validation("probe batch input is invalid", details)
 	}
 	return nil
 }

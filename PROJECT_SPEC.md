@@ -72,6 +72,17 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `request_key`、`success`、`observed_serial`、`latency_ms`。
 - `observed_at`、`stored_at`、`payload_fingerprint`。
 
+### ProbeBatchJob
+
+一次可重试、带检查点的批量探针作业。
+
+- `id`、`plan_id`、`request_key`、`payload_fingerprint`。
+- `state`：`accepted`、`running`、`interrupted` 或 `completed`。
+- `item_count`、`checkpoint`：下一条尚未执行条目的下标。
+- `items`：按租约标识稳定排序的条目数组，每项保留接收时的客户端下标 `client_index`、原租约 `lease_id`、探针请求键、载荷指纹和单项结果。
+- 单项结果 `outcome` 为 `success`、`replay`、`conflict`、`expired` 或 `not_executed`，并携带 `probe_id` 或稳定的 `error_code`。
+- 相同请求键和相同内容重放接收阶段返回原作业，内容不一致时返回冲突。
+
 ### RolloutAssessment
 
 一次计划范围内的确定性一致性判定。
@@ -124,6 +135,16 @@ ready --lease--> leased --report--> ready
 - 同租约同请求键同内容重放返回原探针，不重复计数。
 - 同请求键不同载荷返回 `idempotency_conflict`。
 - 探针标识符由服务生成，客户端不能覆盖。
+
+### 批量探针作业
+
+- 接收（`PUT /v1/plans/{id}/probe-batches`）逐项校验载荷、租约存在性、租约归属和批次内租约重复，批次规模为 1 到 250；任何一项不通过都不落作业。
+- 接收阶段只做校验与登记，不写探针；条目按租约标识稳定排序，原下标通过 `client_index` 保留。
+- 确认与续跑从显式检查点开始：每条条目与探针写入、单项结果和检查点推进处于同一个事务。
+- 每条条目最多产生一个终态：`success`（新写入）、`replay`（命中已存探针）、`conflict`（租约已释放、同键异载荷、计划不再活动等终态拒绝）、`expired`（租约过期）或 `not_executed`（检查点之后的待执行项）。
+- 作业请求键和整批载荷指纹闭合批次身份；条目载荷指纹与单条探针使用同一计算方式，单条入口与批次入口共用同一个写入内核。
+- 取消或失败时检查点不动，已执行条目保持终态；`PATCH .../resume` 从检查点继续，绝不重复写探针。
+- 普通单条探针入口 `PATCH /v1/leases/{id}/probes` 继续独立可用。
 
 ### 一致性判定
 
@@ -194,6 +215,27 @@ ready --lease--> leased --report--> ready
 
 失败行为：租约过期、计划未激活、同键异载荷或持久化失败时保持原状态。
 
+### W3b 批量探针作业
+
+入口：
+
+- `PUT /v1/plans/{id}/probe-batches`
+- `PATCH /v1/probe-batches/{id}/confirm`
+- `PATCH /v1/probe-batches/{id}/resume`
+- `GET /v1/probe-batches/{id}`
+
+步骤：
+
+1. 接收阶段严格解码，逐项校验载荷，按租约标识稳定排序并保留客户端下标。
+2. 存储层在锁内校验计划、全部租约的存在与归属，以及批次内租约重复；记录幂等的 `accepted` 作业，不写探针。
+3. 确认阶段先清理到期租约，随后每一条目在独立事务内调用与单条入口相同的探针内核，写入单项结果并推进检查点。
+4. 单项终态为 `success`、`replay`、`conflict`、`expired` 或 `not_executed`；取消或瞬态失败把作业标记为 `interrupted`，检查点不变。
+5. 续跑从检查点继续，跳过所有已终态条目；整批完成时作业转为 `completed`。
+
+成功行为：批次身份由请求键与整批指纹闭合，单项结果可按 `client_index` 对照原请求，单项探针与原租约闭合。
+
+失败行为：接收不通过不落任何状态；作业重试不重复写探针；部分失败后可从明确检查点继续；单条探针入口行为不变。
+
 ### W4 一致性判定
 
 入口：
@@ -222,6 +264,7 @@ ready --lease--> leased --report--> ready
 | fleet | `internal/fleet` | 解析节点档案、唯一名称和分页查询 |
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
+| probebatch | `internal/probebatch` | 批量探针作业接收、单项事务、检查点和重放判定 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
 | domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
 | store | `internal/store` | 锁内副本事务和原子 JSON 持久化 |
@@ -258,6 +301,10 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/plans/{id}/leases`
 - `PATCH /v1/leases/{id}/release`
 - `PATCH /v1/leases/{id}/probes`
+- `PUT /v1/plans/{id}/probe-batches`
+- `PATCH /v1/probe-batches/{id}/confirm`
+- `PATCH /v1/probe-batches/{id}/resume`
+- `GET /v1/probe-batches/{id}`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
 
@@ -281,6 +328,7 @@ ready --lease--> leased --report--> ready
 1. 计划创建、版本追加、激活、完成和非法重复迁移。
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
-4. 一致性通过、审核触发、最新结果查询和幂等重放。
+4. 批量探针作业接收校验、稳定排序、逐项结果、取消后续跑和不重复写。
+5. 一致性通过、审核触发、最新结果查询和幂等重放。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

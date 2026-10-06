@@ -142,6 +142,57 @@ type AuditEvent struct {
 	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
+type ProbeBatchState string
+
+const (
+	ProbeBatchAccepted    ProbeBatchState = "accepted"
+	ProbeBatchRunning     ProbeBatchState = "running"
+	ProbeBatchInterrupted ProbeBatchState = "interrupted"
+	ProbeBatchCompleted   ProbeBatchState = "completed"
+)
+
+type ProbeItemOutcome string
+
+const (
+	ProbeItemSuccess     ProbeItemOutcome = "success"
+	ProbeItemReplay      ProbeItemOutcome = "replay"
+	ProbeItemConflict    ProbeItemOutcome = "conflict"
+	ProbeItemExpired     ProbeItemOutcome = "expired"
+	ProbeItemNotExecuted ProbeItemOutcome = "not_executed"
+)
+
+// ProbeBatchItem is one accepted lease/probe pair and its terminal result.
+type ProbeBatchItem struct {
+	Index              int              `json:"index"`
+	ClientIndex        int              `json:"client_index"`
+	LeaseID            string           `json:"lease_id"`
+	RequestKey         string           `json:"request_key"`
+	Success            bool             `json:"success"`
+	ObservedSerial     uint32           `json:"observed_serial"`
+	LatencyMS          int              `json:"latency_ms"`
+	ObservedAt         time.Time        `json:"observed_at"`
+	PayloadFingerprint string           `json:"payload_fingerprint"`
+	Outcome            ProbeItemOutcome `json:"outcome"`
+	ProbeID            string           `json:"probe_id,omitempty"`
+	ErrorCode          string           `json:"error_code,omitempty"`
+	ErrorMessage       string           `json:"error_message,omitempty"`
+	ExecutedAt         *time.Time       `json:"executed_at,omitempty"`
+}
+
+// ProbeBatchJob is an idempotent, checkpointed batch of probe submissions.
+type ProbeBatchJob struct {
+	ID                 string           `json:"id"`
+	PlanID             string           `json:"plan_id"`
+	RequestKey         string           `json:"request_key"`
+	PayloadFingerprint string           `json:"payload_fingerprint"`
+	State              ProbeBatchState  `json:"state"`
+	ItemCount          int              `json:"item_count"`
+	Checkpoint         int              `json:"checkpoint"`
+	Items              []ProbeBatchItem `json:"items"`
+	CreatedAt          time.Time        `json:"created_at"`
+	UpdatedAt          time.Time        `json:"updated_at"`
+}
+
 type State struct {
 	SchemaVersion         int                          `json:"schema_version"`
 	Revision              uint64                       `json:"revision"`
@@ -152,8 +203,10 @@ type State struct {
 	LeaseGroups           map[string]LeaseGroup        `json:"lease_groups"`
 	Probes                map[string]Probe             `json:"probes"`
 	Assessments           map[string]RolloutAssessment `json:"assessments"`
+	ProbeBatches          map[string]ProbeBatchJob     `json:"probe_batches"`
 	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
 	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
+	ProbeBatchRequestKeys map[string]string            `json:"probe_batch_request_keys"`
 	AuditEvents           []AuditEvent                 `json:"audit_events"`
 }
 

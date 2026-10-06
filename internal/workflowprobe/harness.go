@@ -19,6 +19,7 @@ import (
 	"solo-0014-zone-rollout-control/internal/plan"
 	"solo-0014-zone-rollout-control/internal/platform"
 	"solo-0014-zone-rollout-control/internal/probe"
+	"solo-0014-zone-rollout-control/internal/probebatch"
 	"solo-0014-zone-rollout-control/internal/store"
 )
 
@@ -48,8 +49,9 @@ func newHarness() (*harness, error) {
 	nodes := fleet.New(stateStore, clock, ids)
 	allocations := allocation.New(stateStore, clock, ids)
 	probes := probe.New(stateStore, clock, ids, allocations)
+	probeBatches := probebatch.New(stateStore, clock, ids, allocations)
 	assessments := assessment.New(stateStore, clock, ids)
-	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
+	api := httpapi.New(plans, nodes, allocations, probes, probeBatches, assessments, ids, logger)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -79,6 +81,16 @@ func (h *harness) close() {
 }
 
 func (h *harness) call(method string, path string, requestBody any, target any) error {
+	return h.callCtx(context.Background(), method, path, requestBody, target)
+}
+
+func (h *harness) callCtx(
+	ctx context.Context,
+	method string,
+	path string,
+	requestBody any,
+	target any,
+) error {
 	var payload []byte
 	var err error
 	if requestBody != nil {
@@ -87,7 +99,7 @@ func (h *harness) call(method string, path string, requestBody any, target any) 
 			return fmt.Errorf("encode request: %w", err)
 		}
 	}
-	request, err := http.NewRequest(method, h.baseURL+path, bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, method, h.baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}

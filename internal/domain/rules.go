@@ -67,6 +67,26 @@ func ProbeFingerprint(leaseID string, input ProbeInput) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ProbeBatchFingerprint covers the whole accepted submission after the items
+// have been put into stable order, so replays are independent of item order.
+func ProbeBatchFingerprint(planID string, input ProbeBatchInput, items []ProbeBatchItem) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "batch|%s|%s|%d\n", planID, input.RequestKey, len(items))
+	for _, item := range items {
+		fmt.Fprintf(
+			h,
+			"%s|%s|%t|%d|%d|%s\n",
+			item.LeaseID,
+			item.RequestKey,
+			item.Success,
+			item.ObservedSerial,
+			item.LatencyMS,
+			item.ObservedAt.UTC().Format(time.RFC3339Nano),
+		)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func BuildAssessment(
 	id string,
 	plan RolloutPlan,
