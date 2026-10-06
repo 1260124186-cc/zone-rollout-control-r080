@@ -44,6 +44,7 @@ internal/plan               计划及区域版本服务
 internal/fleet              解析节点档案服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
+internal/probebatch         批量探针作业、逐项账本和检查点恢复
 internal/assessment         一致性聚合和最新结果查询
 internal/httpapi            HTTP 路由、中间件和响应映射
 internal/workflowprobe      真实 HTTP 路径验证
@@ -127,6 +128,36 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/leases/<lease_id>/probes \
   }'
 ```
 
+批量提交探针（一次请求登记多个租约的结果，逐项返回 `stored`、`replayed`、`conflict`、`expired` 或 `not_executed`）：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/probe-batches \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_key": "probe-batch-0001",
+    "items": [
+      {
+        "lease_id": "<lease_id_1>",
+        "request_key": "probe-request-0001",
+        "success": true,
+        "observed_serial": 2026092501,
+        "latency_ms": 12,
+        "observed_at": "2026-09-25T12:00:00Z"
+      },
+      {
+        "lease_id": "<lease_id_2>",
+        "request_key": "probe-request-0002",
+        "success": true,
+        "observed_serial": 2026092501,
+        "latency_ms": 18,
+        "observed_at": "2026-09-25T12:00:01Z"
+      }
+    ]
+  }'
+```
+
+批次以 `request_key` 幂等：同键同内容重试返回同一作业（HTTP 200）并从检查点继续，不会重复写探针；同键异内容返回 `idempotency_conflict`。用 `GET /v1/probe-batches/<batch_id>` 随时查询逐项账本和 `committed_count` 检查点。
+
 请求一致性判定：
 
 ```bash
@@ -176,6 +207,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
 | `PATCH` | `/v1/leases/{id}/release` | 提前释放租约 |
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
+| `PUT` | `/v1/probe-batches` | 批量登记探针并返回逐项结果 |
+| `GET` | `/v1/probe-batches/{id}` | 查询批量作业账本和检查点 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
 
@@ -187,6 +220,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
+- 批量探针作业在接收阶段逐项校验载荷、租约和批次内重复，按稳定顺序逐项提交并持久化 `committed_count` 检查点；作业重试从检查点继续，不会重复写探针。
+- 批量项结果与单条探针入口共享同一套租约判定，两个入口互相可见、状态闭合。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
@@ -215,6 +250,7 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
+go run ./cmd/workflowprobe probe-batch-job
 go run ./cmd/workflowprobe consistency-assessment
 ```
 

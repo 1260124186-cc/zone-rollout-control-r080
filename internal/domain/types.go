@@ -34,6 +34,23 @@ const (
 	VerdictReviewRequired Verdict = "review_required"
 )
 
+type ProbeBatchState string
+
+const (
+	ProbeBatchAccepted  ProbeBatchState = "accepted"
+	ProbeBatchCommitted ProbeBatchState = "committed"
+)
+
+type ProbeBatchItemOutcome string
+
+const (
+	ProbeBatchItemStored      ProbeBatchItemOutcome = "stored"
+	ProbeBatchItemReplayed    ProbeBatchItemOutcome = "replayed"
+	ProbeBatchItemConflict    ProbeBatchItemOutcome = "conflict"
+	ProbeBatchItemExpired     ProbeBatchItemOutcome = "expired"
+	ProbeBatchItemNotExecuted ProbeBatchItemOutcome = "not_executed"
+)
+
 type EntryType string
 
 const (
@@ -119,6 +136,44 @@ type Probe struct {
 	PayloadFingerprint string    `json:"payload_fingerprint"`
 }
 
+type ProbeBatchItemError struct {
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
+// ProbeBatchItem is one ledger entry of a probe batch. Items are stored in
+// stable commit order; Position maps back to the submitted array index. An
+// item whose Outcome is not_executed and whose Error is nil is still pending
+// and will be decided when the batch is resumed.
+type ProbeBatchItem struct {
+	Position       int                   `json:"position"`
+	LeaseID        string                `json:"lease_id"`
+	RequestKey     string                `json:"request_key"`
+	Success        bool                  `json:"success"`
+	ObservedSerial uint32                `json:"observed_serial"`
+	LatencyMS      int                   `json:"latency_ms"`
+	ObservedAt     time.Time             `json:"observed_at"`
+	Outcome        ProbeBatchItemOutcome `json:"outcome"`
+	ProbeID        string                `json:"probe_id,omitempty"`
+	Error          *ProbeBatchItemError  `json:"error,omitempty"`
+}
+
+// ProbeBatch is the idempotent record of one batch probe job. CommittedCount
+// is the checkpoint: it counts items with a final outcome, and a retry of the
+// same request key resumes deciding the remaining pending items in order.
+type ProbeBatch struct {
+	ID                 string           `json:"id"`
+	RequestKey         string           `json:"request_key"`
+	RequestFingerprint string           `json:"request_fingerprint"`
+	State              ProbeBatchState  `json:"state"`
+	Total              int              `json:"total"`
+	CommittedCount     int              `json:"committed_count"`
+	Items              []ProbeBatchItem `json:"items"`
+	CreatedAt          time.Time        `json:"created_at"`
+	FinishedAt         *time.Time       `json:"finished_at,omitempty"`
+}
+
 type RolloutAssessment struct {
 	ID               string    `json:"id"`
 	PlanID           string    `json:"plan_id"`
@@ -151,8 +206,10 @@ type State struct {
 	Leases                map[string]NodeLease         `json:"leases"`
 	LeaseGroups           map[string]LeaseGroup        `json:"lease_groups"`
 	Probes                map[string]Probe             `json:"probes"`
+	ProbeBatches          map[string]ProbeBatch        `json:"probe_batches"`
 	Assessments           map[string]RolloutAssessment `json:"assessments"`
 	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
+	ProbeBatchRequestKeys map[string]string            `json:"probe_batch_request_keys"`
 	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
 	AuditEvents           []AuditEvent                 `json:"audit_events"`
 }

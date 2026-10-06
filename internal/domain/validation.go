@@ -16,6 +16,7 @@ const (
 	MinRequestKeyRunes = 8
 	MaxRequestKeyRunes = 64
 	MaxEntries         = 500
+	MaxProbeBatchItems = 500
 )
 
 type PlanCreateInput struct {
@@ -50,6 +51,20 @@ type ProbeInput struct {
 	ObservedSerial uint32    `json:"observed_serial"`
 	LatencyMS      int       `json:"latency_ms"`
 	ObservedAt     time.Time `json:"observed_at"`
+}
+
+type ProbeBatchItemInput struct {
+	LeaseID        string    `json:"lease_id"`
+	RequestKey     string    `json:"request_key"`
+	Success        bool      `json:"success"`
+	ObservedSerial uint32    `json:"observed_serial"`
+	LatencyMS      int       `json:"latency_ms"`
+	ObservedAt     time.Time `json:"observed_at"`
+}
+
+type ProbeBatchInput struct {
+	RequestKey string                `json:"request_key"`
+	Items      []ProbeBatchItemInput `json:"items"`
 }
 
 type AssessmentInput struct {
@@ -245,6 +260,24 @@ func ValidateAssessmentInput(input AssessmentInput) error {
 		return Validation("assessment input is invalid", map[string]any{
 			"request_key": err.Error(),
 		})
+	}
+	return nil
+}
+
+// ValidateProbeBatchInput checks only batch-level fields. Item payloads are
+// validated during intake so that a malformed item is recorded on the batch
+// ledger instead of rejecting the whole job.
+func ValidateProbeBatchInput(input ProbeBatchInput) error {
+	input.RequestKey = strings.TrimSpace(input.RequestKey)
+	details := make(map[string]any)
+	if err := validateRequestKey(input.RequestKey); err != nil {
+		details["request_key"] = err.Error()
+	}
+	if len(input.Items) < 1 || len(input.Items) > MaxProbeBatchItems {
+		details["items"] = "must contain between 1 and 500 items"
+	}
+	if len(details) > 0 {
+		return Validation("probe batch input is invalid", details)
 	}
 	return nil
 }

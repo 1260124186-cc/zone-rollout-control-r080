@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -63,6 +64,28 @@ func ProbeFingerprint(leaseID string, input ProbeInput) string {
 		input.LatencyMS,
 		input.ObservedAt.UTC().Format(time.RFC3339Nano),
 	)
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])
+}
+
+// ProbeBatchFingerprint identifies the content of a batch job. Item lines
+// are sorted before hashing so that resubmitting the same items in a
+// different order replays the original batch instead of conflicting.
+func ProbeBatchFingerprint(input ProbeBatchInput) string {
+	lines := make([]string, 0, len(input.Items))
+	for _, item := range input.Items {
+		lines = append(lines, fmt.Sprintf(
+			"%s|%s|%t|%d|%d|%s",
+			strings.TrimSpace(item.LeaseID),
+			strings.TrimSpace(item.RequestKey),
+			item.Success,
+			item.ObservedSerial,
+			item.LatencyMS,
+			item.ObservedAt.UTC().Format(time.RFC3339Nano),
+		))
+	}
+	sort.Strings(lines)
+	payload := strings.TrimSpace(input.RequestKey) + "\x00" + strings.Join(lines, "\n")
 	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
 }

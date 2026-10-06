@@ -19,6 +19,7 @@ import (
 	"solo-0014-zone-rollout-control/internal/plan"
 	"solo-0014-zone-rollout-control/internal/platform"
 	"solo-0014-zone-rollout-control/internal/probe"
+	"solo-0014-zone-rollout-control/internal/probebatch"
 	"solo-0014-zone-rollout-control/internal/store"
 )
 
@@ -48,8 +49,9 @@ func newHarness() (*harness, error) {
 	nodes := fleet.New(stateStore, clock, ids)
 	allocations := allocation.New(stateStore, clock, ids)
 	probes := probe.New(stateStore, clock, ids, allocations)
+	probeBatches := probebatch.New(stateStore, clock, ids, allocations)
 	assessments := assessment.New(stateStore, clock, ids)
-	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
+	api := httpapi.New(plans, nodes, allocations, probes, probeBatches, assessments, ids, logger)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -79,29 +81,34 @@ func (h *harness) close() {
 }
 
 func (h *harness) call(method string, path string, requestBody any, target any) error {
+	_, err := h.callStatus(method, path, requestBody, target)
+	return err
+}
+
+func (h *harness) callStatus(method string, path string, requestBody any, target any) (int, error) {
 	var payload []byte
 	var err error
 	if requestBody != nil {
 		payload, err = json.Marshal(requestBody)
 		if err != nil {
-			return fmt.Errorf("encode request: %w", err)
+			return 0, fmt.Errorf("encode request: %w", err)
 		}
 	}
 	request, err := http.NewRequest(method, h.baseURL+path, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return 0, fmt.Errorf("create request: %w", err)
 	}
 	if requestBody != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	response, err := h.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("perform request: %w", err)
+		return 0, fmt.Errorf("perform request: %w", err)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		return 0, fmt.Errorf("read response: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var failure struct {
@@ -111,25 +118,25 @@ func (h *harness) call(method string, path string, requestBody any, target any) 
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(body, &failure); err != nil {
-			return fmt.Errorf("decode error response: %w", err)
+			return response.StatusCode, fmt.Errorf("decode error response: %w", err)
 		}
-		return &apiFailure{
+		return response.StatusCode, &apiFailure{
 			Status:  response.StatusCode,
 			Code:    failure.Error.Code,
 			Message: failure.Error.Message,
 		}
 	}
 	if target == nil {
-		return nil
+		return response.StatusCode, nil
 	}
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return response.StatusCode, fmt.Errorf("decode response: %w", err)
 	}
 	if err := json.Unmarshal(envelope.Data, target); err != nil {
-		return fmt.Errorf("decode response data: %w", err)
+		return response.StatusCode, fmt.Errorf("decode response data: %w", err)
 	}
-	return nil
+	return response.StatusCode, nil
 }

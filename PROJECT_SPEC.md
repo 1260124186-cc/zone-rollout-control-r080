@@ -72,6 +72,18 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `request_key`、`success`、`observed_serial`、`latency_ms`。
 - `observed_at`、`stored_at`、`payload_fingerprint`。
 
+### ProbeBatch
+
+一次批量探针作业的幂等账本，把整批提交和逐项结果绑定在一个稳定身份下。
+
+- `id`、`request_key`、`request_fingerprint`。
+- `state`：`accepted`（已接收、仍有待提交项）或 `committed`（全部决定完毕）。
+- `total`、`committed_count`：检查点，统计已获得最终结果的项数。
+- `items`：按稳定提交顺序排列的逐项账本，每项记录 `position`（原提交序号）、`lease_id`、`request_key`、原始载荷、`outcome`、`probe_id` 和 `error`。
+- `created_at`、`finished_at`。
+
+单项 `outcome` 取值为 `stored`、`replayed`、`conflict`、`expired` 或 `not_executed`。`not_executed` 且不带 `error` 的项是待提交项，作业恢复时按顺序继续决定；带 `error` 的项在接收阶段已被最终拒绝。
+
 ### RolloutAssessment
 
 一次计划范围内的确定性一致性判定。
@@ -124,6 +136,14 @@ ready --lease--> leased --report--> ready
 - 同租约同请求键同内容重放返回原探针，不重复计数。
 - 同请求键不同载荷返回 `idempotency_conflict`。
 - 探针标识符由服务生成，客户端不能覆盖。
+
+### 批量探针作业
+
+- 批次以 `request_key` 加内容指纹标识；同键同内容重放返回原作业，同键异内容返回 `idempotency_conflict`。
+- 接收阶段逐项校验载荷、租约存在性和批次内重复租约；被拒项记录为最终结果，不阻断其余项。
+- 确认后按租约标识、请求键、原序号排序的稳定顺序提交，每项一个事务并同步推进 `committed_count` 检查点。
+- 作业中断后用同一请求键重试，从首个待提交项继续，已决定的项不会重复写探针。
+- 单项结果与单条探针入口共享同一份租约判定和写入规则，两边互相可见、互不双写。
 
 ### 一致性判定
 
@@ -212,6 +232,24 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 批量探针作业
+
+入口：
+
+- `PUT /v1/probe-batches`
+- `GET /v1/probe-batches/{id}`
+
+步骤：
+
+1. 入口校验批次请求键和条目数量，计算批次内容指纹。
+2. 接收事务清理到期租约，逐项校验载荷、租约存在性和批次内重复，按稳定顺序落账，批次状态为 `accepted`。
+3. 提交循环每项一个事务：按与单条入口相同的规则决定 `stored`、`replayed`、`conflict` 或 `expired`，写入探针、完成租约、释放节点并推进检查点。
+4. 全部项决定完毕后批次转为 `committed` 并记录完成时间。
+
+成功行为：一次请求返回逐项结果；同键重试返回同一作业且不重复写探针。
+
+失败行为：批次级校验失败整体拒绝；瞬时存储失败中断作业，已提交项保持有效，重试从检查点继续。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -222,6 +260,7 @@ ready --lease--> leased --report--> ready
 | fleet | `internal/fleet` | 解析节点档案、唯一名称和分页查询 |
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
+| probebatch | `internal/probebatch` | 批量探针作业的接收、稳定提交和检查点恢复 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
 | domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
 | store | `internal/store` | 锁内副本事务和原子 JSON 持久化 |
@@ -258,6 +297,8 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/plans/{id}/leases`
 - `PATCH /v1/leases/{id}/release`
 - `PATCH /v1/leases/{id}/probes`
+- `PUT /v1/probe-batches`
+- `GET /v1/probe-batches/{id}`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
 
@@ -282,5 +323,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 批量探针的逐项结果、稳定顺序、重试不双写、并发同键归一和过期项识别。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

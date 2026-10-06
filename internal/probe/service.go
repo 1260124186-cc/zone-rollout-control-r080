@@ -44,56 +44,15 @@ func (s *Service) Submit(
 	fingerprint := domain.ProbeFingerprint(leaseID, input)
 	var result domain.Probe
 	err := s.store.Write(ctx, func(state *domain.State) error {
-		lease, ok := state.Leases[leaseID]
-		if !ok {
-			return domain.NotFound("lease", leaseID)
+		existing, replay, err := domain.CheckProbeSubmission(state, leaseID, input.RequestKey, fingerprint, now)
+		if err != nil {
+			return err
 		}
-		if lease.State == domain.LeaseReported && lease.ProbeID != "" {
-			existing, found := state.Probes[lease.ProbeID]
-			if !found {
-				return domain.NewError(domain.CodeStorageFailure, "lease references a missing probe", map[string]any{
-					"probe_id": lease.ProbeID,
-				})
-			}
-			if existing.PayloadFingerprint != fingerprint {
-				return domain.NewError(domain.CodeIdempotencyConflict, "request key was reused with different probe content", map[string]any{
-					"lease_id":    leaseID,
-					"request_key": input.RequestKey,
-				})
-			}
+		if replay {
 			result = existing
 			return nil
 		}
-		if lease.State != domain.LeaseClaimed {
-			return domain.NewError(domain.CodeLeaseNotClaimed, "lease is not claimed", map[string]any{
-				"lease_id": leaseID,
-				"state":    lease.State,
-			})
-		}
-		if !now.Before(lease.ExpiresAt) {
-			return domain.NewError(domain.CodeLeaseExpired, "lease has expired", map[string]any{
-				"lease_id":   leaseID,
-				"expires_at": lease.ExpiresAt,
-			})
-		}
-		plan, ok := state.Plans[lease.PlanID]
-		if !ok {
-			return domain.NewError(domain.CodeStorageFailure, "lease references a missing plan", map[string]any{
-				"plan_id": lease.PlanID,
-			})
-		}
-		if plan.State != domain.PlanActive {
-			return domain.InvalidState("plan must be active to store probes", map[string]any{
-				"plan_id": plan.ID,
-				"state":   plan.State,
-			})
-		}
-		node, ok := state.Nodes[lease.NodeID]
-		if !ok {
-			return domain.NewError(domain.CodeStorageFailure, "lease references a missing node", map[string]any{
-				"node_id": lease.NodeID,
-			})
-		}
+		lease := state.Leases[leaseID]
 		result = domain.Probe{
 			ID:                 s.ids.New("prb"),
 			LeaseID:            leaseID,
@@ -107,18 +66,7 @@ func (s *Service) Submit(
 			StoredAt:           now,
 			PayloadFingerprint: fingerprint,
 		}
-		state.Probes[result.ID] = result
-		lease.State = domain.LeaseReported
-		finishedAt := now
-		lease.FinishedAt = &finishedAt
-		lease.ProbeID = result.ID
-		state.Leases[leaseID] = lease
-		if node.State == domain.NodeLeased {
-			node.State = domain.NodeReady
-			node.Version++
-			node.UpdatedAt = now
-			state.Nodes[node.ID] = node
-		}
+		domain.ApplyProbe(state, result, now)
 		store.AddAudit(state, s.ids, "probe", result.ID, "stored", now, map[string]any{
 			"lease_id": leaseID,
 			"plan_id":  lease.PlanID,
